@@ -92,11 +92,31 @@ _POLICY_RECOVERY_RX = re.compile(
     r"((?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)(?:\s*\.\s*(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+))*)"
     r"(?:\s+AS\s+(PERMISSIVE|RESTRICTIVE))?"
     r"(?:\s+FOR\s+(SELECT|INSERT|UPDATE|DELETE|ALL))?"
-    r"(?:\s+TO\s+((?:(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)\s*,\s*)*(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)))?"
-    r"(?:\s+USING\s*\((?P<using>(?:[^()]|\([^()]*\))*)\))?"
-    r"(?:\s+WITH\s+CHECK\s*\((?P<check>(?:[^()]|\([^()]*\))*)\))?",
+    r"(?:\s+TO\s+((?:(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)\s*,\s*)*(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)))?",
     re.IGNORECASE,
 )
+# USING (...) / WITH CHECK (...) bodies are located separately below via a
+# manual balanced-paren scan, not captured in this regex -- arbitrarily
+# nested parens (e.g. fn(a, (b + (c))) style expressions) defeat any
+# fixed-depth pattern that only tolerates one level of nesting.
+_USING_KW_RX = re.compile(r"\s*USING\s*\(", re.IGNORECASE)
+_CHECK_KW_RX = re.compile(r"\s*WITH\s+CHECK\s*\(", re.IGNORECASE)
+
+_SQL_PREDICATE_KEYWORDS = {
+    "in", "not", "and", "or", "is", "exists", "any", "all", "some",
+    "case", "when", "between", "like", "ilike", "similar",
+}
+
+def _match_balanced_parens(s, open_pos):
+    depth = 0
+    for i in range(open_pos, len(s)):
+        if s[i] == "(":
+            depth += 1
+        elif s[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return s[open_pos + 1 : i], i + 1
+    return None
 
 _FUNC_CALL_RX = re.compile(r"\b([\w$]+(?:\.[\w$]+)?)\s*\(")
 
@@ -728,12 +748,25 @@ def extract_sql(path: Path, content: str | bytes | None = None) -> dict:
             pol_nid = _make_id(stem, f"{tbl_name}.{pol_name}")
             _add_node(pol_nid, pol_name, pol_line)
             _add_edge(pol_nid, tbl_nid, "applies_to", pol_line)
-
-            body = " ".join(filter(None, [m.group("using"), m.group("check")]))
+            pos = m.end()
+            using_body = check_body = ""
+            um = _USING_KW_RX.match(masked_src, pos)
+            if um:
+                result = _match_balanced_parens(masked_src, um.end() - 1)
+                if result:
+                    using_body, pos = result
+                else:
+                    pos = um.end()
+            cm = _CHECK_KW_RX.match(masked_src, pos)
+            if cm:
+                result = _match_balanced_parens(masked_src, cm.end() - 1)
+                if result:
+                    check_body, pos = result
+            body = " ".join(filter(None, [using_body, check_body]))
             seen_fns = set()
             for fm in _FUNC_CALL_RX.finditer(body):
                 fn_key = _norm_ident(fm.group(1))
-                if fn_key in seen_fns:
+                if fn_key in _SQL_PREDICATE_KEYWORDS or fn_key in seen_fns:
                     continue
                 seen_fns.add(fn_key)
                 fn_nid = table_nids.get(fn_key) or _ref_stub(fm.group(1))
