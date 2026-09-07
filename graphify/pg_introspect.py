@@ -105,9 +105,12 @@ def introspect_postgres(dsn: str | None = None) -> dict:
                     pol.polcmd AS command,
                     pol.polpermissive AS permissive,
                     COALESCE(
-                        (SELECT ARRAY_AGG(r.rolname ORDER BY r.rolname)
+                        (SELECT ARRAY_AGG(
+                                    CASE WHEN ro.oid = 0 THEN 'public' ELSE r.rolname END
+                                    ORDER BY CASE WHEN ro.oid = 0 THEN 'public' ELSE r.rolname END
+                                 )
                            FROM UNNEST(pol.polroles) AS ro(oid)
-                           JOIN pg_catalog.pg_roles r ON r.oid = ro.oid),
+                           LEFT JOIN pg_catalog.pg_roles r ON r.oid = ro.oid),
                         ARRAY['public']
                     ) AS roles,
                     pg_get_expr(pol.polqual, pol.polrelid) AS using_expr,

@@ -716,7 +716,7 @@ def extract_sql(path: Path, content: str | bytes | None = None) -> dict:
             fn_line = src_text[: m.start()].count("\n") + 1
             fn_nid = _make_id(stem, fn_name)
             _add_node(fn_nid, f"{fn_name}()", fn_line)
-            table_nids[_norm_ident(fn_name)] = fn_nid
+            table_nids.setdefault(_norm_ident(fn_name), fn_nid)
 
         for m in _POLICY_RECOVERY_RX.finditer(masked_src):
             if any(s <= m.start() < e for s, e in ident_spans):
