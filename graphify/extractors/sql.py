@@ -85,18 +85,6 @@ _ROUTINE_RECOVERY_RX = re.compile(
 # `CREATE POLICY p ON t;` is valid, if useless), so each clause is its
 # own non-greedy optional group rather than a single big alternation —
 # a required-TO assumption silently dropped USING-only policies in an
-# earlier draft of this fix.
-_POLICY_RECOVERY_RX = re.compile(
-    r"\bCREATE\s+POLICY\s+"
-    r"(\"(?:[^\"\n]|\"\")+\"|[\w$]+)\s+ON\s+"
-    r"((?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)(?:\s*\.\s*(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+))*)"
-    r"(?:\s+AS\s+(PERMISSIVE|RESTRICTIVE))?"
-    r"(?:\s+FOR\s+(SELECT|INSERT|UPDATE|DELETE|ALL))?"
-    r"(?:\s+TO\s+((?:(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)\s*,\s*)*(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)))?"
-    r"(?:\s+USING\s*\((?P<using>(?:[^()]|\([^()]*\))*)\))?"
-    r"(?:\s+WITH\s+CHECK\s*\((?P<check>(?:[^()]|\([^()]*\))*)\))?",
-    re.IGNORECASE,
-)
 
 _POLICY_RECOVERY_RX = re.compile(
     r"\bCREATE\s+POLICY\s+"
@@ -726,7 +714,9 @@ def extract_sql(path: Path, content: str | bytes | None = None) -> dict:
                 continue
             fn_name = m.group(1)
             fn_line = src_text[: m.start()].count("\n") + 1
-            _add_node(_make_id(stem, fn_name), f"{fn_name}()", fn_line)
+            fn_nid = _make_id(stem, fn_name)
+            _add_node(fn_nid, f"{fn_name}()", fn_line)
+            table_nids[_norm_ident(fn_name)] = fn_nid
 
         for m in _POLICY_RECOVERY_RX.finditer(masked_src):
             if any(s <= m.start() < e for s, e in ident_spans):
@@ -740,8 +730,13 @@ def extract_sql(path: Path, content: str | bytes | None = None) -> dict:
             _add_edge(pol_nid, tbl_nid, "applies_to", pol_line)
 
             body = " ".join(filter(None, [m.group("using"), m.group("check")]))
+            seen_fns = set()
             for fm in _FUNC_CALL_RX.finditer(body):
-                fn_nid = table_nids.get(_norm_ident(fm.group(1))) or _ref_stub(fm.group(1))
+                fn_key = _norm_ident(fm.group(1))
+                if fn_key in seen_fns:
+                    continue
+                seen_fns.add(fn_key)
+                fn_nid = table_nids.get(fn_key) or _ref_stub(fm.group(1))
                 _add_edge(pol_nid, fn_nid, "references", pol_line)
 
     return {"nodes": nodes, "edges": edges}

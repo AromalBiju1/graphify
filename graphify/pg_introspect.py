@@ -173,7 +173,7 @@ def introspect_postgres(dsn: str | None = None) -> dict:
             f"CREATE POLICY {_quote_ident(name)} ON {_quote_ident(schema)}.{_quote_ident(table)}",
             "AS PERMISSIVE" if permissive else "AS RESTRICTIVE",
             f"FOR {_CMD_MAP.get(cmd, 'ALL')}",
-            f"TO {', '.join(_quote_ident(r) for r in roles)}",
+            f"TO {', '.join('PUBLIC' if r.lower() == 'public' else _quote_ident(r) for r in roles)}",
         ]
         if using_expr:
             clauses.append(f"USING ({using_expr})")
