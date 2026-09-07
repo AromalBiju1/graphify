@@ -74,6 +74,43 @@ _ROUTINE_RECOVERY_RX = re.compile(
 # Closing it would need a real string heuristic (e.g. an end-of-line opening
 # quote), judged not worth the swallow risk in a recovery-only path.
 
+# Recovers CREATE POLICY statements. The grammar has NO rule for CREATE
+# POLICY at all — not a partial/error-node case like routines, every
+# policy statement disintegrates into loose top-level tokens plus an
+# ERROR node with no CREATE text in it (#3401). So there is no walk-time
+# node to dispatch on; this is whole-file-fallback only, same gate and
+# masking as _ROUTINE_RECOVERY_RX.
+#
+# TO/USING/WITH CHECK are all optional in real SQL (a bare
+# `CREATE POLICY p ON t;` is valid, if useless), so each clause is its
+# own non-greedy optional group rather than a single big alternation —
+# a required-TO assumption silently dropped USING-only policies in an
+# earlier draft of this fix.
+_POLICY_RECOVERY_RX = re.compile(
+    r"\bCREATE\s+POLICY\s+"
+    r"(\"(?:[^\"\n]|\"\")+\"|[\w$]+)\s+ON\s+"
+    r"((?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)(?:\s*\.\s*(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+))*)"
+    r"(?:\s+AS\s+(PERMISSIVE|RESTRICTIVE))?"
+    r"(?:\s+FOR\s+(SELECT|INSERT|UPDATE|DELETE|ALL))?"
+    r"(?:\s+TO\s+((?:(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)\s*,\s*)*(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)))?"
+    r"(?:\s+USING\s*\((?P<using>(?:[^()]|\([^()]*\))*)\))?"
+    r"(?:\s+WITH\s+CHECK\s*\((?P<check>(?:[^()]|\([^()]*\))*)\))?",
+    re.IGNORECASE,
+)
+
+_POLICY_RECOVERY_RX = re.compile(
+    r"\bCREATE\s+POLICY\s+"
+    r"(\"(?:[^\"\n]|\"\")+\"|[\w$]+)\s+ON\s+"
+    r"((?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)(?:\s*\.\s*(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+))*)"
+    r"(?:\s+AS\s+(PERMISSIVE|RESTRICTIVE))?"
+    r"(?:\s+FOR\s+(SELECT|INSERT|UPDATE|DELETE|ALL))?"
+    r"(?:\s+TO\s+((?:(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)\s*,\s*)*(?:\"(?:[^\"\n]|\"\")+\"|[\w$]+)))?"
+    r"(?:\s+USING\s*\((?P<using>(?:[^()]|\([^()]*\))*)\))?"
+    r"(?:\s+WITH\s+CHECK\s*\((?P<check>(?:[^()]|\([^()]*\))*)\))?",
+    re.IGNORECASE,
+)
+
+_FUNC_CALL_RX = re.compile(r"\b([\w$]+(?:\.[\w$]+)?)\s*\(")
 
 def _scan_sql(text: str) -> tuple[str, list[tuple[int, int]]]:
     """Blank comment and string-literal spans, preserving every offset.
@@ -690,5 +727,21 @@ def extract_sql(path: Path, content: str | bytes | None = None) -> dict:
             fn_name = m.group(1)
             fn_line = src_text[: m.start()].count("\n") + 1
             _add_node(_make_id(stem, fn_name), f"{fn_name}()", fn_line)
+
+        for m in _POLICY_RECOVERY_RX.finditer(masked_src):
+            if any(s <= m.start() < e for s, e in ident_spans):
+                continue
+            pol_name = m.group(1).strip('"')
+            tbl_name = m.group(2)
+            pol_line = src_text[: m.start()].count("\n") + 1
+            tbl_nid = table_nids.get(_norm_ident(tbl_name)) or _ref_stub(tbl_name)
+            pol_nid = _make_id(stem, f"{tbl_name}.{pol_name}")
+            _add_node(pol_nid, pol_name, pol_line)
+            _add_edge(pol_nid, tbl_nid, "applies_to", pol_line)
+
+            body = " ".join(filter(None, [m.group("using"), m.group("check")]))
+            for fm in _FUNC_CALL_RX.finditer(body):
+                fn_nid = table_nids.get(_norm_ident(fm.group(1))) or _ref_stub(fm.group(1))
+                _add_edge(pol_nid, fn_nid, "references", pol_line)
 
     return {"nodes": nodes, "edges": edges}
